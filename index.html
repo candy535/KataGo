@@ -3,9 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>五子棋｜完整版（音效+ 
-
-开始游戏+AI执黑白）</title>
+<title>五子棋｜最终版（音效+ 开始游戏+AI执黑白）</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
 <style>
@@ -237,6 +235,7 @@ document.addEventListener('DOMContentLoaded', () => {
   let aiTimer = null;
   let aiPlaysBlack = false;
   let aiPlaysWhite = true;
+  let isClicking = false; // 点击锁
 
   const aiThinkingOverlay = document.getElementById('ai-thinking-overlay');
   const playerTurn = document.getElementById('player-turn');
@@ -250,19 +249,21 @@ document.addEventListener('DOMContentLoaded', () => {
   const thinkTimeSelect = document.getElementById('think-time');
   const aiLevelDisplay = document.getElementById('ai-level-display');
 
-  // 音效
+  // ====================== 全局音频上下文（单例，不关闭） ======================
+  let globalAudioCtx = null;
+
   function playMoveSound() {
-    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
+    if (!globalAudioCtx) globalAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = globalAudioCtx.createOscillator();
+    const gain = globalAudioCtx.createGain();
     osc.type = 'sine';
     osc.frequency.value = 880;
     gain.gain.value = 0.2;
     osc.connect(gain);
-    gain.connect(audioCtx.destination);
+    gain.connect(globalAudioCtx.destination);
     osc.start();
-    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
-    osc.stop(audioCtx.currentTime + 0.15);
+    gain.gain.exponentialRampToValueAtTime(0.001, globalAudioCtx.currentTime + 0.15);
+    osc.stop(globalAudioCtx.currentTime + 0.15);
   }
 
   const notes = {
@@ -275,19 +276,18 @@ document.addEventListener('DOMContentLoaded', () => {
   ];
   let isPlayingMelody = false;
   async function playNote(freq, duration) {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
+    if (!globalAudioCtx) globalAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = globalAudioCtx.createOscillator();
+    const gain = globalAudioCtx.createGain();
     osc.type = 'sine';
     osc.frequency.value = freq;
     gain.gain.value = 0.3;
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(globalAudioCtx.destination);
     osc.start();
-    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + duration - 0.05);
-    osc.stop(ctx.currentTime + duration);
+    gain.gain.exponentialRampToValueAtTime(0.01, globalAudioCtx.currentTime + duration - 0.05);
+    osc.stop(globalAudioCtx.currentTime + duration);
     await new Promise(r => setTimeout(r, duration * 1000));
-    await ctx.close();
   }
   async function playStartSound() {
     if (isPlayingMelody) return;
@@ -375,7 +375,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (checkDraw()) { 
       gameOver=true; 
-      gameState.textContent='平局'; 
+      gameState.textContent='平局';
+      // 平局弹窗
+      modalIcon.innerHTML = '🤝';
+      modalText.className = 'win-text';
+      modalText.textContent = '棋盘已满，双方平局！';
+      modal.classList.add('show');
       return true; 
     }
     currentPlayer = currentPlayer===1?2:1;
@@ -443,54 +448,586 @@ document.addEventListener('DOMContentLoaded', () => {
     return true;
   }
 
-  // ====================== 【只加强这里：AI棋力拉满】 ======================
-  function evaluateLine(r,c,dr,dc,p){
-    let my=0, empty=0, block=0;
-    for(let i=1;i<=4;i++){
-      const nr=r+dr*i, nc=c+dc*i;
-      if(nr<0||nr>=15||nc<0||nc>=15){block++;break;}
-      if(board[nr][nc]===p)my++;
-      else if(board[nr][nc]===0){empty++;break;}
-      else{block++;break;}
-    }
-    for(let i=1;i<=4;i++){
-      const nr=r-dr*i, nc=c-dc*i;
-      if(nr<0||nr>=15||nc<0||nc>=15){block++;break;}
-      if(board[nr][nc]===p)my++;
-      else if(board[nr][nc]===0){empty++;break;}
-      else{block++;break;}
-    }
-    if(my>=4) return 100000;
-    if(my===3 && empty===2) return 50000;
-    if(my===3 && empty===1) return 10000;
-    if(my===2 && empty===2) return 5000;
-    if(my===2 && empty===1) return 1000;
-    if(my===1) return 100;
-    return my;
+  // ====================== 全局常量 & 棋型定义 ======================
+  const MAX = 1000000000;
+  const onlyThreeThreshold = 6;
+
+  const FIVE = 10000000;
+  const BLOCK_FIVE = FIVE;
+  const FOUR = 100000;
+  const FOUR_FOUR = FOUR;
+  const FOUR_THREE = FOUR;
+  const THREE_THREE = FOUR / 2;
+  const BLOCK_FOUR = 1500;
+  const THREE = 1000;
+  const BLOCK_THREE = 150;
+  const TWO_TWO = 200;
+  const TWO = 100;
+  const BLOCK_TWO = 15;
+  const ONE = 10;
+  const BLOCK_ONE = 1;
+
+  const shapes = {
+    FIVE: 5,
+    BLOCK_FIVE: 50,
+    FOUR: 4,
+    FOUR_FOUR: 44,
+    FOUR_THREE: 43,
+    THREE_THREE: 33,
+    BLOCK_FOUR: 40,
+    THREE: 3,
+    BLOCK_THREE: 30,
+    TWO_TWO: 22,
+    TWO: 2,
+    NONE: 0,
+  };
+
+  const allDirections = [
+    [0, 1],
+    [1, 0],
+    [1, 1],
+    [1, -1]
+  ];
+
+  function direction2index(ox, oy) {
+    if (ox === 0) return 0;
+    if (oy === 0) return 1;
+    if (ox === oy) return 2;
+    return 3;
   }
 
-  function evaluatePos(r,c,p){
-    if(board[r][c]!==0)return -99999;
-    let score=0;
-    const dirs=[[0,1],[1,0],[1,1],[1,-1]];
-    for(const [dx,dy] of dirs) score += evaluateLine(r,c,dx,dy,p);
-    for(const [dx,dy] of dirs) score += evaluateLine(r,c,dx,dy,3-p) * 0.9;
-    score += (20 - Math.abs(r-7) - Math.abs(c-7)) * 5;
-    return score;
-  }
+  function getShapeFast(board, x, y, offsetX, offsetY, role) {
+    if (board[x + offsetX + 1][y + offsetY + 1] === 0
+      && board[x - offsetX + 1][y - offsetY + 1] === 0
+      && board[x + 2 * offsetX + 1][y + 2 * offsetY + 1] === 0
+      && board[x - 2 * offsetX + 1][y - 2 * offsetY + 1] === 0
+    ) {
+      return [shapes.NONE, 1];
+    }
 
-  function getBestMove(){
-    let maxScore=-Infinity, best=null;
-    const aiPlayer = aiPlaysBlack ? 1 : 2;
-    for(let r=0;r<15;r++){
-      for(let c=0;c<15;c++){
-        const s=evaluatePos(r,c,aiPlayer);
-        if(s>maxScore){maxScore=s;best={row:r,col:c};}
+    let selfCount = 1;
+    let totalLength = 1;
+    let shape = shapes.NONE;
+
+    let leftEmpty = 0, rightEmpty = 0;
+    let noEmptySelfCount = 1, OneEmptySelfCount = 1;
+
+    const left = countShape(board, x, y, -offsetX, -offsetY, role);
+    const right = countShape(board, x, y, offsetX, offsetY, role);
+
+    selfCount = left.selfCount + right.selfCount + 1;
+    totalLength = left.totalLength + right.totalLength + 1;
+    noEmptySelfCount = left.noEmptySelfCount + right.noEmptySelfCount + 1;
+    OneEmptySelfCount = Math.max(left.OneEmptySelfCount + right.noEmptySelfCount, left.noEmptySelfCount + right.OneEmptySelfCount) + 1;
+    rightEmpty = right.sideEmptyCount;
+    leftEmpty = left.sideEmptyCount;
+
+    if (totalLength < 5) return [shape, selfCount];
+
+    if (noEmptySelfCount >= 5) {
+      if (rightEmpty > 0 && leftEmpty > 0) {
+        return [shapes.FIVE, selfCount];
+      } else {
+        return [shapes.BLOCK_FIVE, selfCount];
       }
     }
-    return best;
+    if (noEmptySelfCount === 4) {
+      if ((rightEmpty >= 1 || right.OneEmptySelfCount > right.noEmptySelfCount) && (leftEmpty >= 1 || left.OneEmptySelfCount > left.noEmptySelfCount)) {
+        return [shapes.FOUR, selfCount];
+      } else if (!(rightEmpty === 0 && leftEmpty === 0)) {
+        return [shapes.BLOCK_FOUR, selfCount];
+      }
+    }
+    if (OneEmptySelfCount === 4) {
+      return [shapes.BLOCK_FOUR, selfCount];
+    }
+    if (noEmptySelfCount === 3) {
+      if ((rightEmpty >= 2 && leftEmpty >= 1) || (rightEmpty >= 1 && leftEmpty >= 2)) {
+        return [shapes.THREE, selfCount];
+      } else {
+        return [shapes.BLOCK_THREE, selfCount];
+      }
+    }
+    if (OneEmptySelfCount === 3) {
+      if ((rightEmpty >= 1 && leftEmpty >= 1)) {
+        return [shapes.THREE, selfCount];
+      } else {
+        return [shapes.BLOCK_THREE, selfCount];
+      }
+    }
+    if ((noEmptySelfCount === 2 || OneEmptySelfCount === 2) && totalLength > 5) {
+      shape = shapes.TWO;
+    }
+    return [shape, selfCount];
   }
-  // ======================================================================
+
+  function countShape(board, x, y, offsetX, offsetY, role) {
+    const opponent = -role;
+    let innerEmptyCount = 0;
+    let tempEmptyCount = 0;
+    let selfCount = 0;
+    let totalLength = 0;
+    let sideEmptyCount = 0;
+    let noEmptySelfCount = 0, OneEmptySelfCount = 0;
+
+    for (let i = 1; i <= 5; i++) {
+      const nx = x + i * offsetX + 1;
+      const ny = y + i * offsetY + 1;
+      const currentRole = board[nx][ny];
+      if (currentRole === 2 || currentRole === opponent) break;
+      if (currentRole === role) {
+        selfCount++;
+        sideEmptyCount = 0;
+        if (tempEmptyCount) {
+          innerEmptyCount += tempEmptyCount;
+          tempEmptyCount = 0;
+        }
+        if (innerEmptyCount === 0) {
+          noEmptySelfCount++;
+          OneEmptySelfCount++;
+        } else if (innerEmptyCount === 1) {
+          OneEmptySelfCount++;
+        }
+      }
+      totalLength++;
+      if (currentRole === 0) {
+        tempEmptyCount++;
+        sideEmptyCount++;
+      }
+      if (sideEmptyCount >= 2) break;
+    }
+    if (!innerEmptyCount) OneEmptySelfCount = 0;
+    return { selfCount, totalLength, noEmptySelfCount, OneEmptySelfCount, innerEmptyCount, sideEmptyCount };
+  }
+
+  function isFive(shape) {
+    return shape === shapes.FIVE || shape === shapes.BLOCK_FIVE;
+  }
+  function isFour(shape) {
+    return shape === shapes.FOUR || shape === shapes.BLOCK_FOUR;
+  }
+
+  function getRealShapeScore(shape) {
+    switch (shape) {
+      case shapes.FIVE: return FOUR;
+      case shapes.BLOCK_FIVE: return BLOCK_FOUR;
+      case shapes.FOUR: return THREE;
+      case shapes.FOUR_FOUR: return THREE;
+      case shapes.FOUR_THREE: return THREE;
+      case shapes.BLOCK_FOUR: return BLOCK_THREE;
+      case shapes.THREE: return TWO;
+      case shapes.THREE_THREE: return THREE_THREE / 10;
+      case shapes.BLOCK_THREE: return BLOCK_TWO;
+      case shapes.TWO: return ONE;
+      case shapes.TWO_TWO: return TWO_TWO / 10;
+      default: return 0;
+    }
+  }
+
+  class Evaluate {
+    constructor(size = 15) {
+      this.size = size;
+      this.board = Array.from({ length: size + 2 }).map((_, i) =>
+        Array.from({ length: size + 2 }).map((_, j) =>
+          (i === 0 || j === 0 || i === size + 1 || j === size + 1) ? 2 : 0
+        )
+      );
+      this.blackScores = Array.from({ length: size }).map(() => Array(size).fill(0));
+      this.whiteScores = Array.from({ length: size }).map(() => Array(size).fill(0));
+      this.initPoints();
+      this.history = [];
+      this.config = { inlineCount: 4, inLineDistance: 3, pointsLimit: 20 };
+    }
+
+    move(x, y, role) {
+      for (let d = 0; d < 4; d++) {
+        this.shapeCache[role][d][x][y] = shapes.NONE;
+        this.shapeCache[-role][d][x][y] = shapes.NONE;
+      }
+      this.blackScores[x][y] = 0;
+      this.whiteScores[x][y] = 0;
+      this.board[x + 1][y + 1] = role;
+      this.updatePoint(x, y);
+      this.history.push([x * this.size + y, role]);
+    }
+
+    undo(x, y) {
+      this.board[x + 1][y + 1] = 0;
+      this.updatePoint(x, y);
+      this.history.pop();
+    }
+
+    initPoints() {
+      this.shapeCache = {};
+      for (let role of [1, -1]) {
+        this.shapeCache[role] = {};
+        for (let d = 0; d < 4; d++) {
+          this.shapeCache[role][d] = Array(this.size).fill().map(() => Array(this.size).fill(shapes.NONE));
+        }
+      }
+      this.pointsCache = {};
+      for (let role of [1, -1]) {
+        this.pointsCache[role] = {};
+        Object.values(shapes).forEach(s => this.pointsCache[role][s] = new Set());
+      }
+    }
+
+    updatePoint(x, y) {
+      this.updateSinglePoint(x, y, 1);
+      this.updateSinglePoint(x, y, -1);
+      for (let [ox, oy] of allDirections) {
+        for (let sign of [1, -1]) {
+          let reachEdge = false;
+          for (let step = 1; step <= 5; step++) {
+            for (let role of [1, -1]) {
+              const nx = x + sign * step * ox;
+              const ny = y + sign * step * oy;
+              if (nx < 0 || nx >= this.size || ny < 0 || ny >= this.size) {
+                reachEdge = true;
+                break;
+              }
+              if (this.board[nx + 1][ny + 1] === 0) {
+                this.updateSinglePoint(nx, ny, role, [sign * ox, sign * oy]);
+              }
+            }
+            if (reachEdge) break;
+          }
+        }
+      }
+    }
+
+    updateSinglePoint(x, y, role, direction) {
+      if (this.board[x + 1][y + 1] !== 0) return;
+      this.board[x + 1][y + 1] = role;
+      let directions = direction ? [direction] : allDirections;
+      const shapeCache = this.shapeCache[role];
+      directions.forEach(([ox, oy]) => {
+        const idx = direction2index(ox, oy);
+        shapeCache[idx][x][y] = shapes.NONE;
+      });
+
+      let score = 0;
+      let blockfourCount = 0, threeCount = 0, twoCount = 0;
+      for (let d = 0; d < 4; d++) {
+        const s = shapeCache[d][x][y];
+        if (s > shapes.NONE) {
+          score += getRealShapeScore(s);
+          if (s === shapes.BLOCK_FOUR) blockfourCount++;
+          if (s === shapes.THREE) threeCount++;
+          if (s === shapes.TWO) twoCount++;
+        }
+      }
+
+      for (let [ox, oy] of directions) {
+        const idx = direction2index(ox, oy);
+        const [shape] = getShapeFast(this.board, x, y, ox, oy, role);
+        if (!shape) continue;
+        shapeCache[idx][x][y] = shape;
+        if (shape === shapes.BLOCK_FOUR) blockfourCount++;
+        if (shape === shapes.THREE) threeCount++;
+        if (shape === shapes.TWO) twoCount++;
+
+        let curShape = shape;
+        if (blockfourCount >= 2) curShape = shapes.FOUR_FOUR;
+        else if (blockfourCount && threeCount) curShape = shapes.FOUR_THREE;
+        else if (threeCount >= 2) curShape = shapes.THREE_THREE;
+        else if (twoCount >= 2) curShape = shapes.TWO_TWO;
+        score += getRealShapeScore(curShape);
+      }
+
+      this.board[x + 1][y + 1] = 0;
+      if (role === 1) this.blackScores[x][y] = score;
+      else this.whiteScores[x][y] = score;
+      return score;
+    }
+
+    evaluate(role) {
+      let blackScore = 0, whiteScore = 0;
+      for (let i = 0; i < this.size; i++) {
+        for (let j = 0; j < this.size; j++) {
+          blackScore += this.blackScores[i][j];
+          whiteScore += this.whiteScores[i][j];
+        }
+      }
+      return role === 1 ? blackScore - whiteScore : whiteScore - blackScore;
+    }
+
+    _getMoves(role, depth, onlyThree = false, onlyFour = false) {
+      const pts = this.getPoints(role, depth, onlyThree, onlyFour);
+      let set = new Set();
+      if (pts[shapes.FIVE].size || pts[shapes.BLOCK_FIVE].size) {
+        pts[shapes.FIVE].forEach(v => set.add(v));
+        pts[shapes.BLOCK_FIVE].forEach(v => set.add(v));
+        return set;
+      }
+      if (onlyFour || pts[shapes.FOUR].size) {
+        pts[shapes.FOUR].forEach(v => set.add(v));
+        pts[shapes.BLOCK_FOUR].forEach(v => set.add(v));
+        return set;
+      }
+      if (pts[shapes.FOUR_FOUR].size) {
+        pts[shapes.FOUR_FOUR].forEach(v => set.add(v));
+        pts[shapes.BLOCK_FOUR].forEach(v => set.add(v));
+        return set;
+      }
+      if (pts[shapes.FOUR_THREE].size) {
+        pts[shapes.FOUR_THREE].forEach(v => set.add(v));
+        pts[shapes.BLOCK_FOUR].forEach(v => set.add(v));
+        pts[shapes.THREE].forEach(v => set.add(v));
+        return set;
+      }
+      if (pts[shapes.THREE_THREE].size) {
+        pts[shapes.THREE_THREE].forEach(v => set.add(v));
+        pts[shapes.BLOCK_FOUR].forEach(v => set.add(v));
+        pts[shapes.THREE].forEach(v => set.add(v));
+        return set;
+      }
+      if (onlyThree) {
+        pts[shapes.BLOCK_FOUR].forEach(v => set.add(v));
+        pts[shapes.THREE].forEach(v => set.add(v));
+        return set;
+      }
+      pts[shapes.BLOCK_FOUR].forEach(v => set.add(v));
+      pts[shapes.THREE].forEach(v => set.add(v));
+      pts[shapes.BLOCK_THREE].forEach(v => set.add(v));
+      pts[shapes.TWO_TWO].forEach(v => set.add(v));
+      pts[shapes.TWO].forEach(v => set.add(v));
+      return new Set([...set].slice(0, this.config.pointsLimit));
+    }
+
+    getMoves(role, depth, onlyThree = false, onlyFour = false) {
+      const s = this._getMoves(role, depth, onlyThree, onlyFour);
+      return Array.from(s).map(p => [Math.floor(p / this.size), p % this.size]);
+    }
+
+    getPoints(role, depth, vct, vcf) {
+      const points = {};
+      Object.values(shapes).forEach(s => points[s] = new Set());
+      const last4 = this.history.slice(-4).map(item => item[0]);
+
+      for (let r of [role, -role]) {
+        for (let i = 0; i < this.size; i++) {
+          for (let j = 0; j < this.size; j++) {
+            if (this.board[i + 1][j + 1] !== 0) continue;
+            let fourCount = 0, blockFourCount = 0, threeCount = 0;
+            for (let d = 0; d < 4; d++) {
+              const shape = this.shapeCache[r][d][i][j];
+              if (!shape) continue;
+              const pos = i * this.size + j;
+              if (vcf && !isFour(shape) && !isFive(shape)) continue;
+              if (vct) {
+                if (depth % 2 === 0) {
+                  if (depth === 0 && r !== role) continue;
+                  if (shape !== shapes.THREE && !isFour(shape) && !isFive(shape)) continue;
+                  if (shape === shapes.THREE && r !== role) continue;
+                } else {
+                  if (shape !== shapes.THREE && !isFour(shape) && !isFive(shape)) continue;
+                  if (shape === shapes.THREE && r === -role) continue;
+                }
+              }
+              if (depth > 2 && (shape === shapes.TWO || shape === shapes.TWO_TWO || shape === shapes.BLOCK_THREE)) {
+                let near = false;
+                for (let lp of last4) {
+                  if (Math.abs(lp - pos) < this.size * 3) { near = true; break; }
+                }
+                if (!near) continue;
+              }
+              points[shape].add(pos);
+              if (shape === shapes.FOUR) fourCount++;
+              if (shape === shapes.BLOCK_FOUR) blockFourCount++;
+              if (shape === shapes.THREE) threeCount++;
+              let union = null;
+              if (fourCount >= 2) union = shapes.FOUR_FOUR;
+              else if (blockFourCount && threeCount) union = shapes.FOUR_THREE;
+              else if (threeCount >= 2) union = shapes.THREE_THREE;
+              if (union) points[union].add(pos);
+            }
+          }
+        }
+      }
+      return points;
+    }
+  }
+
+  class Board {
+    constructor(size = 15) {
+      this.size = size;
+      this.board = Array(size).fill().map(() => Array(size).fill(0));
+      this.role = 1;
+      this.history = [];
+      this.evaluator = new Evaluate(size);
+    }
+
+    isGameOver() {
+      if (this.getWinner() !== 0) return true;
+      for (let i = 0; i < this.size; i++) {
+        for (let j = 0; j < this.size; j++) {
+          if (this.board[i][j] === 0) return false;
+        }
+      }
+      return true;
+    }
+
+    getWinner() {
+      const dirs = [[1, 0], [0, 1], [1, 1], [1, -1]];
+      for (let i = 0; i < this.size; i++) {
+        for (let j = 0; j < this.size; j++) {
+          if (this.board[i][j] === 0) continue;
+          const r = this.board[i][j];
+          for (let [dx, dy] of dirs) {
+            let cnt = 0;
+            while (i + dx * cnt >= 0 && i + dx * cnt < this.size
+              && j + dy * cnt >= 0 && j + dy * cnt < this.size
+              && this.board[i + dx * cnt][j + dy * cnt] === r) {
+              cnt++;
+            }
+            if (cnt >= 5) return r;
+          }
+        }
+      }
+      return 0;
+    }
+
+    put(i, j, role) {
+      if (this.board[i][j] !== 0) return false;
+      this.board[i][j] = role;
+      this.history.push({ i, j, role });
+      this.evaluator.move(i, j, role);
+      this.role *= -1;
+      return true;
+    }
+
+    undo() {
+      if (this.history.length === 0) return false;
+      const last = this.history.pop();
+      this.board[last.i][last.j] = 0;
+      this.role = last.role;
+      this.evaluator.undo(last.i, last.j);
+      return true;
+    }
+
+    getValuableMoves(role, depth = 0, onlyThree = false, onlyFour = false) {
+      const moves = this.evaluator.getMoves(role, depth, onlyThree, onlyFour);
+      const c = Math.floor(this.size / 2);
+      let hasCenter = false;
+      for (let [x, y] of moves) {
+        if (x === c && y === c) { hasCenter = true; break; }
+      }
+      if (!onlyThree && !onlyFour && !hasCenter && this.board[c][c] === 0) {
+        moves.push([c, c]);
+      }
+      return moves;
+    }
+
+    evaluate(role) {
+      const w = this.getWinner();
+      if (w !== 0) return FIVE * w * role;
+      return this.evaluator.evaluate(role);
+    }
+
+    reverse() {
+      let b = new Board(this.size);
+      for (let h of this.history) {
+        b.put(h.i, h.j, -h.role);
+      }
+      return b;
+    }
+
+    hash() { return 0; }
+  }
+
+  function createMinimax(onlyThree = false, onlyFour = false) {
+    return function helper(board, role, depth, cDepth = 0, path = [], alpha = -MAX, beta = MAX) {
+      if (cDepth >= depth || board.isGameOver()) {
+        return [board.evaluate(role), null, [...path]];
+      }
+      let value = -MAX;
+      let move = null;
+      let bestPath = [...path];
+      let bestDepth = 0;
+      const points = board.getValuableMoves(role, cDepth, onlyThree || cDepth > onlyThreeThreshold, onlyFour);
+      if (!points.length) {
+        return [board.evaluate(role), null, [...path]];
+      }
+
+      for (let d = cDepth + 1; d <= depth; d++) {
+        if (d % 2 !== 0) continue;
+        let breakAll = false;
+        for (let i = 0; i < points.length; i++) {
+          const [x, y] = points[i];
+          board.put(x, y, role);
+          const [curVal, , curPath] = helper(board, -role, d, cDepth + 1, [...path, [x, y]], -beta, -alpha);
+          const currentValue = -curVal;
+          board.undo();
+
+          if (currentValue >= FIVE || d === depth) {
+            if ((currentValue > value) ||
+              (currentValue <= -FIVE && value <= -FIVE && curPath.length > bestDepth)) {
+              value = currentValue;
+              move = [x, y];
+              bestPath = curPath;
+              bestDepth = curPath.length;
+            }
+          }
+          alpha = Math.max(alpha, value);
+          if (alpha >= FIVE) { breakAll = true; break; }
+          if (alpha >= beta) break;
+        }
+        if (breakAll) break;
+      }
+      return [value, move, bestPath];
+    }
+  }
+
+  const _minmax = createMinimax();
+  const vct = createMinimax(true);
+  const vcf = createMinimax(false, true);
+
+  function runMinimax(board, role, depth = 4, enableVCT = true) {
+    if (enableVCT) {
+      const vctDepth = depth + 8;
+      let [val, mv, path] = vct(board, role, vctDepth);
+      if (val >= FIVE) return [val, mv, path];
+      [val, mv, path] = _minmax(board, role, depth);
+      if (mv) {
+        board.put(mv[0], mv[1], role);
+        const [v2, , p2] = vct(board.reverse(), role, vctDepth);
+        board.undo();
+        if (val < FIVE && v2 === FIVE && p2.length > path.length) {
+          const [, mv3, p3] = vct(board.reverse(), role, vctDepth);
+          if (p2.length <= p3.length) return [val, mv3, p2];
+        }
+      }
+      return [val, mv, path];
+    } else {
+      return _minmax(board, role, depth);
+    }
+  }
+
+  let gameBoard = null;
+
+  function syncBoard() {
+    if (!gameBoard) gameBoard = new Board(15);
+    while (gameBoard.history.length > 0) gameBoard.undo();
+    for (let i = 0; i < 15; i++) {
+      for (let j = 0; j < 15; j++) {
+        if (board[i][j] === 1) gameBoard.put(i, j, 1);
+        else if (board[i][j] === 2) gameBoard.put(i, j, -1);
+      }
+    }
+  }
+
+  function getBestMove() {
+    syncBoard();
+    const aiRole = aiPlaysBlack ? 1 : -1;
+    let depth = 3;
+    if (aiDifficultySelect.value === "easy") depth = 2;
+    else if (aiDifficultySelect.value === "hard") depth = 4;
+
+    const [, move] = runMinimax(gameBoard, aiRole, depth, true);
+    if (!move) return null;
+    return { row: move[0], col: move[1] };
+  }
 
   function aiMove(){
     if(aiTimer)clearTimeout(aiTimer);
@@ -507,7 +1044,6 @@ document.addEventListener('DOMContentLoaded', () => {
     },delay);
   }
 
-  // 重置游戏
   function resetGame(){
     if(aiTimer)clearTimeout(aiTimer);
     board=Array(15).fill().map(()=>Array(15).fill(0));
@@ -520,6 +1056,9 @@ document.addEventListener('DOMContentLoaded', () => {
     initBoard(); 
     updatePlayerTurn();
     document.getElementById('resultModal').classList.remove('show');
+    // 重置AI按钮样式
+    aiBlackBtn.style.background = '#3b82f6';
+    aiWhiteBtn.style.background = '#3b82f6';
   }
 
   function startGame() {
@@ -547,19 +1086,20 @@ document.addEventListener('DOMContentLoaded', () => {
     aiBlackBtn.style.background = '#3b82f6';
   }
 
-  // 棋盘点击
   canvas.addEventListener('click',(e)=>{
+    if(isClicking) return;
     if(!gameStarted||gameOver)return;
     if(aiPlaysBlack && currentPlayer === 1) return;
     if(aiPlaysWhite && currentPlayer === 2) return;
-    
+
+    isClicking = true;
     const rect=canvas.getBoundingClientRect();
     const x=e.clientX-rect.left, y=e.clientY-rect.top;
     const col=Math.floor(x/cellSize), row=Math.floor(y/cellSize);
     if(placePiece(row,col)&&!gameOver) aiMove();
+    setTimeout(()=> isClicking = false, 200);
   });
 
-  // 按钮事件
   startBtn.onclick = startGame;
   aiBlackBtn.onclick = setAIBlack;
   aiWhiteBtn.onclick = setAIWhite;
@@ -573,7 +1113,6 @@ document.addEventListener('DOMContentLoaded', () => {
     aiLevelDisplay.textContent=aiDifficultySelect.options[aiDifficultySelect.selectedIndex].text;
   };
 
-  // 弹窗
   const modal = document.getElementById('resultModal');
   const modalIcon = document.getElementById('modalIcon');
   const modalText = document.getElementById('modalText');
